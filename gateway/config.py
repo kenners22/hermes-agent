@@ -851,6 +851,11 @@ def load_gateway_config() -> GatewayConfig:
                         bridged["channel_prompts"] = channel_prompts
                 if plat == Platform.TELEGRAM and "group_topics" in platform_cfg:
                     bridged["group_topics"] = platform_cfg["group_topics"]
+                if plat == Platform.TELEGRAM and "typing_indicators" in platform_cfg:
+                    bridged["typing_indicators"] = _coerce_bool(
+                        platform_cfg.get("typing_indicators"),
+                        True,
+                    )
                 enabled_was_explicit = "enabled" in platform_cfg
                 if not bridged and not enabled_was_explicit:
                     continue
