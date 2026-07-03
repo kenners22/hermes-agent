@@ -457,6 +457,7 @@ def dispatch_async_delegation(
     role: str,
     model: Optional[str],
     session_key: str,
+    parent_session_id: Optional[str] = None,
     runner: Callable[[], Dict[str, Any]],
     origin_ui_session_id: str = "",
     interrupt_fn: Optional[Callable[[], None]] = None,
@@ -474,6 +475,11 @@ def dispatch_async_delegation(
         captured on the parent thread BEFORE dispatch, because the daemon
         worker thread won't carry the contextvar. Used to route the
         completion back to the originating session.
+    parent_session_id
+        The durable ``state.db`` session id of the parent agent that spawned
+        the delegation. Carried on the completion event so the gateway can
+        pin routing to the spawning session instead of recovering the latest
+        ``ended_at IS NULL`` row for the peer tuple (#57498).
     runner
         Zero-arg callable that builds + runs the child and returns the same
         result dict ``_run_single_child`` produces. Runs on the worker thread.
@@ -502,6 +508,7 @@ def dispatch_async_delegation(
         "model": model,
         "session_key": session_key,
         "origin_ui_session_id": origin_ui_session_id,
+        "parent_session_id": parent_session_id,
         "status": "running",
         "dispatched_at": dispatched_at,
         "completed_at": None,
@@ -621,6 +628,7 @@ def _push_completion_event(
         # session; empty string => CLI (single-session) path.
         "session_key": record.get("session_key", ""),
         "origin_ui_session_id": record.get("origin_ui_session_id", ""),
+        "parent_session_id": record.get("parent_session_id"),
         "goal": record.get("goal", ""),
         "context": record.get("context"),
         "toolsets": record.get("toolsets"),
@@ -656,6 +664,7 @@ def dispatch_async_delegation_batch(
     role: str,
     model: Optional[str],
     session_key: str,
+    parent_session_id: Optional[str] = None,
     runner: Callable[[], Dict[str, Any]],
     origin_ui_session_id: str = "",
     interrupt_fn: Optional[Callable[[], None]] = None,
@@ -698,6 +707,7 @@ def dispatch_async_delegation_batch(
         "model": model,
         "session_key": session_key,
         "origin_ui_session_id": origin_ui_session_id,
+        "parent_session_id": parent_session_id,
         "status": "running",
         "dispatched_at": dispatched_at,
         "completed_at": None,
@@ -797,6 +807,7 @@ def _finalize_batch(
         "delegation_id": delegation_id,
         "session_key": event_record.get("session_key", ""),
         "origin_ui_session_id": event_record.get("origin_ui_session_id", ""),
+        "parent_session_id": event_record.get("parent_session_id"),
         "goal": event_record.get("goal", ""),
         "goals": event_record.get("goals"),
         "context": event_record.get("context"),
