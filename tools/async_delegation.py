@@ -458,6 +458,7 @@ def dispatch_async_delegation(
     model: Optional[str],
     session_key: str,
     runner: Callable[[], Dict[str, Any]],
+    origin_ui_session_id: str = "",
     interrupt_fn: Optional[Callable[[], None]] = None,
     max_async_children: int = _DEFAULT_MAX_ASYNC_CHILDREN,
 ) -> Dict[str, Any]:
@@ -500,6 +501,7 @@ def dispatch_async_delegation(
         "role": role,
         "model": model,
         "session_key": session_key,
+        "origin_ui_session_id": origin_ui_session_id,
         "status": "running",
         "dispatched_at": dispatched_at,
         "completed_at": None,
@@ -618,6 +620,7 @@ def _push_completion_event(
         # session_key routes the completion back to the originating gateway
         # session; empty string => CLI (single-session) path.
         "session_key": record.get("session_key", ""),
+        "origin_ui_session_id": record.get("origin_ui_session_id", ""),
         "goal": record.get("goal", ""),
         "context": record.get("context"),
         "toolsets": record.get("toolsets"),
@@ -654,6 +657,7 @@ def dispatch_async_delegation_batch(
     model: Optional[str],
     session_key: str,
     runner: Callable[[], Dict[str, Any]],
+    origin_ui_session_id: str = "",
     interrupt_fn: Optional[Callable[[], None]] = None,
     max_async_children: int = _DEFAULT_MAX_ASYNC_CHILDREN,
 ) -> Dict[str, Any]:
@@ -693,6 +697,7 @@ def dispatch_async_delegation_batch(
         "role": role,
         "model": model,
         "session_key": session_key,
+        "origin_ui_session_id": origin_ui_session_id,
         "status": "running",
         "dispatched_at": dispatched_at,
         "completed_at": None,
@@ -791,6 +796,7 @@ def _finalize_batch(
         "type": "async_delegation",
         "delegation_id": delegation_id,
         "session_key": event_record.get("session_key", ""),
+        "origin_ui_session_id": event_record.get("origin_ui_session_id", ""),
         "goal": event_record.get("goal", ""),
         "goals": event_record.get("goals"),
         "context": event_record.get("context"),
