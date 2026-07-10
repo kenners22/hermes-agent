@@ -11242,7 +11242,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                     # original messages and replace them with only the
                                     # compressed summary (permanent data loss, #21301).
                                     if _hyg_rotated or _hyg_in_place:
-                                        self.session_store.rewrite_transcript(
+                                        await self.async_session_store.rewrite_transcript(
                                             session_entry.session_id, _compressed
                                         )
                                         # Reset stored token count — transcript rewritten

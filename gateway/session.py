@@ -8,6 +8,7 @@ Handles:
 - Dynamic system prompt injection (agent knows its context)
 """
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -956,6 +957,23 @@ def build_session_key(
         key_parts.append(str(participant_id))
 
     return ":".join(key_parts)
+
+
+class AsyncSessionStore:
+    """Async boundary for the synchronous, thread-safe SessionStore."""
+
+    def __init__(self, store: "SessionStore") -> None:
+        self._store = store
+
+    def __getattr__(self, name: str):
+        attr = getattr(self._store, name)
+        if not callable(attr):
+            return attr
+
+        async def _offloaded(*args, **kwargs) -> Any:
+            return await asyncio.to_thread(attr, *args, **kwargs)
+
+        return _offloaded
 
 
 class SessionStore:
