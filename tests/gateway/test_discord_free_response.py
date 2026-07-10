@@ -816,6 +816,14 @@ async def test_fetch_channel_context_skips_self_improvement_boundary_message(ada
         [
             make_history_message(
                 author=adapter._client.user,
+                content=(
+                    "Background process bg-456 failed (exit 1). "
+                    "Detailed output is retained internally for agent inspection."
+                ),
+                msg_id=10,
+            ),
+            make_history_message(
+                author=adapter._client.user,
                 content="arbitrary lifecycle text from a metadata-marked send",
                 msg_id=9,
             ),

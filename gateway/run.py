@@ -2479,6 +2479,36 @@ def _parse_session_key(session_key: str) -> "dict | None":
     return None
 
 
+def _format_direct_process_status(
+    session_id: object,
+    exit_code: object = None,
+    *,
+    running: bool = False,
+) -> str:
+    """Return a bounded non-conversational process status for direct delivery.
+
+    Direct watcher messages bypass the agent, so embedding captured stdout here
+    leaks arbitrary command output (including multi-kilobyte JSON) straight into
+    chat. Detailed output stays in the process registry for ``process poll/log``;
+    the chat surface gets lifecycle metadata only. ``notify_on_complete`` still
+    takes the agent-notification path and can produce a normal concise summary.
+    """
+    raw_id = str(session_id or "unknown")
+    safe_id = "".join(
+        ch if ch.isprintable() and not ch.isspace() else "_" for ch in raw_id
+    ).strip("_")[:96]
+    safe_id = safe_id or "unknown"
+    if running:
+        return f"Background process {safe_id} is still running."
+    failed = exit_code not in {0, None}
+    state = "failed" if failed else "completed"
+    suffix = f" (exit {exit_code})" if exit_code is not None else ""
+    return (
+        f"Background process {safe_id} {state}{suffix}. "
+        "Detailed output is retained internally for agent inspection."
+    )
+
+
 def _format_gateway_process_notification(evt: dict) -> "str | None":
     """Format a watch pattern event from completion_queue into a [IMPORTANT:] message."""
     evt_type = evt.get("type", "completion")
@@ -15174,16 +15204,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     or (notify_mode == "error" and session.exit_code not in {0, None})
                 )
                 if should_notify:
-                    new_output = session.output_buffer[-1000:] if session.output_buffer else ""
-                    if new_output:
-                        from agent.redact import redact_terminal_output
-                        new_output = redact_terminal_output(
-                            new_output, getattr(session, "command", "") or ""
-                        )
-                    message_text = (
-                        f"[Background process {session_id} finished with exit code {session.exit_code}~ "
-                        f"Here's the final output:\n{new_output}]"
-                    )
+                    # Direct lifecycle notifications are deliberately metadata-
+                    # only. Captured stdout can be arbitrary, huge, or secret-
+                    # adjacent; it remains available through process poll/log.
+                    message_text = _format_direct_process_status(
+                        session_id, session.exit_code)
                     adapter = None
                     for p, a in self.adapters.items():
                         if p.value == platform_name:
@@ -15202,18 +15227,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 break
 
             elif has_new_output and notify_mode == "all" and not agent_notify:
-                # New output available -- deliver status update (only in "all" mode)
-                # Skip periodic updates for agent_notify watchers (they only care about completion)
-                new_output = session.output_buffer[-500:] if session.output_buffer else ""
-                if new_output:
-                    from agent.redact import redact_terminal_output
-                    new_output = redact_terminal_output(
-                        new_output, getattr(session, "command", "") or ""
-                    )
-                message_text = (
-                    f"[Background process {session_id} is still running~ "
-                    f"New output:\n{new_output}]"
-                )
+                # Direct progress notifications remain lifecycle-only; stdout is
+                # retained in the registry for explicit process poll/log reads.
+                message_text = _format_direct_process_status(
+                    session_id, running=True)
                 adapter = None
                 for p, a in self.adapters.items():
                     if p.value == platform_name:

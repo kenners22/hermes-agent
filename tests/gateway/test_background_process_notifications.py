@@ -14,7 +14,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from gateway.config import GatewayConfig, Platform
-from gateway.run import GatewayRunner, _parse_session_key
+from gateway.run import (
+    GatewayRunner,
+    _format_direct_process_status,
+    _parse_session_key,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +67,43 @@ def _watcher_dict(session_id="proc_test", thread_id=""):
     if thread_id:
         d["thread_id"] = thread_id
     return d
+
+
+# ---------------------------------------------------------------------------
+# Direct notification formatting
+# ---------------------------------------------------------------------------
+
+def test_direct_completion_is_bounded_and_never_embeds_output():
+    huge_json = '{"modelUsage":' + ("x" * 20_000) + "}"
+    message = _format_direct_process_status("proc_abc", 1)
+    assert message == (
+        "Background process proc_abc failed (exit 1). "
+        "Detailed output is retained internally for agent inspection."
+    )
+    assert huge_json not in message
+    assert "final output" not in message.lower()
+    assert len(message) < 160
+
+
+def test_direct_success_and_progress_are_one_line_metadata_only():
+    completed = _format_direct_process_status("proc_ok", 0)
+    running = _format_direct_process_status("proc_ok", running=True)
+    assert completed.startswith("Background process proc_ok completed (exit 0).")
+    assert running == "Background process proc_ok is still running."
+    assert "\n" not in completed
+    assert "\n" not in running
+
+
+def test_direct_status_sanitizes_untrusted_session_id():
+    message = _format_direct_process_status(
+        "proc_bad\n\r\t\x1bINJECT" + ("x" * 200), 2
+    )
+    assert all(ch.isprintable() for ch in message)
+    assert "\n" not in message
+    assert "\r" not in message
+    assert "\t" not in message
+    assert "\x1b" not in message
+    assert len(message) < 260
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +195,7 @@ class TestLoadBackgroundNotificationsMode:
             "result",
             [SimpleNamespace(output_buffer="done\n", exited=True, exit_code=0)],
             1,
-            "finished with exit code 0",
+            "completed (exit 0)",
         ),
         # error mode: exit 0 → no notification
         (
@@ -168,14 +209,14 @@ class TestLoadBackgroundNotificationsMode:
             "error",
             [SimpleNamespace(output_buffer="traceback\n", exited=True, exit_code=1)],
             1,
-            "finished with exit code 1",
+            "failed (exit 1)",
         ),
         # all mode: exited → notifies
         (
             "all",
             [SimpleNamespace(output_buffer="ok\n", exited=True, exit_code=0)],
             1,
-            "finished with exit code 0",
+            "completed (exit 0)",
         ),
     ],
 )
@@ -202,6 +243,9 @@ async def test_run_process_watcher_respects_notification_mode(
     if expected_fragment is not None:
         sent_message = adapter.send.await_args.args[1]
         assert expected_fragment in sent_message
+        assert "\n" not in sent_message
+        assert "final output" not in sent_message.lower()
+        assert "traceback" not in sent_message.lower()
 
 
 @pytest.mark.asyncio
@@ -317,10 +361,15 @@ async def test_agent_notification_carries_message_id_reply_anchor(monkeypatch, t
     await runner._run_process_watcher(watcher)
 
     adapter.handle_message.assert_awaited_once()
+    send_mock = adapter.send
+    assert isinstance(send_mock, AsyncMock)
+    send_mock.assert_not_awaited()
     synth_event = adapter.handle_message.await_args.args[0]
     assert synth_event.internal is True
     assert synth_event.message_id == "555"
     assert synth_event.source.thread_id == "24296"
+    assert "SMOKE_OK" in synth_event.text
+    assert "Output:" in synth_event.text
 
 
 @pytest.mark.asyncio
