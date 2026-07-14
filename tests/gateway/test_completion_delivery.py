@@ -236,6 +236,65 @@ def test_async_receipt_is_thread_correct_and_precedes_parent_synthesis():
     )
 
 
+def test_receipts_from_two_topics_in_one_group_stay_isolated():
+    """A working Food topic is not proof for its sibling topic's route."""
+    adapter = SimpleNamespace(
+        _send_with_retry=AsyncMock(),
+        handle_message=AsyncMock(),
+    )
+    group_id = "-1003956661183"
+    food_key = f"agent:main:telegram:group:{group_id}:678"
+    other_key = f"agent:main:telegram:group:{group_id}:987"
+    origins = {
+        food_key: SimpleNamespace(
+            origin=SessionSource(
+                platform=Platform.TELEGRAM,
+                chat_id=group_id,
+                chat_type="group",
+                thread_id="678",
+            )
+        ),
+        other_key: SimpleNamespace(
+            origin=SessionSource(
+                platform=Platform.TELEGRAM,
+                chat_id=group_id,
+                chat_type="group",
+                thread_id="987",
+            )
+        ),
+    }
+    runner = _runner(adapter, origins=origins)
+
+    food_event = _async_event("deleg_food")
+    food_event.update(session_key=food_key, summary="Food-only child output")
+    other_event = _async_event("deleg_other")
+    other_event.update(session_key=other_key, summary="Other-topic child output")
+
+    async def _deliver_both():
+        return await asyncio.gather(
+            runner._deliver_completion_notification("food completion", food_event),
+            runner._deliver_completion_notification("other completion", other_event),
+        )
+
+    assert asyncio.run(_deliver_both()) == [True, True]
+
+    receipt_routes = [
+        (call.kwargs["chat_id"], call.kwargs["metadata"]["thread_id"])
+        for call in adapter._send_with_retry.await_args_list
+    ]
+    assert receipt_routes == [(group_id, "678"), (group_id, "987")]
+    assert all(
+        "child output" not in call.kwargs["content"]
+        for call in adapter._send_with_retry.await_args_list
+    )
+
+    synthesis_routes = [
+        call.args[0].source.thread_id
+        for call in adapter.handle_message.await_args_list
+    ]
+    assert synthesis_routes == ["678", "987"]
+
+
 def test_ended_parent_suppresses_receipt_and_synthesis():
     adapter = SimpleNamespace(
         _send_with_retry=AsyncMock(),
