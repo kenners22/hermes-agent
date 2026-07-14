@@ -801,7 +801,6 @@ CREATE TABLE IF NOT EXISTS async_delegations (
     delivery_state TEXT NOT NULL DEFAULT 'pending',
     delivery_attempts INTEGER NOT NULL DEFAULT 0,
     delivered_at REAL,
-    receipt_sent_at REAL,
     owner_pid INTEGER,
     owner_started_at INTEGER,
     task_json TEXT,
