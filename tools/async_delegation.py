@@ -104,7 +104,6 @@ def _connect() -> sqlite3.Connection:
             delivery_state TEXT NOT NULL DEFAULT 'pending',
             delivery_attempts INTEGER NOT NULL DEFAULT 0,
             delivered_at REAL,
-            receipt_sent_at REAL,
             owner_pid INTEGER,
             owner_started_at INTEGER,
             task_json TEXT,
@@ -119,7 +118,6 @@ def _connect() -> sqlite3.Connection:
         ("task_json", "TEXT"),
         ("delivery_claim", "TEXT"),
         ("delivery_claimed_at", "REAL"),
-        ("receipt_sent_at", "REAL"),
     ):
         if name not in columns:
             conn.execute(f"ALTER TABLE async_delegations ADD COLUMN {name} {sql_type}")
@@ -335,29 +333,6 @@ def release_completion_delivery(delegation_id: str, claim_id: str) -> bool:
         return cur.rowcount == 1
 
 
-def completion_receipt_sent(delegation_id: str) -> bool:
-    """Return whether a user-visible completion receipt was already sent."""
-    with _DB_LOCK, _connect() as conn:
-        row = conn.execute(
-            "SELECT receipt_sent_at FROM async_delegations WHERE delegation_id=?",
-            (delegation_id,),
-        ).fetchone()
-    return bool(row and row[0] is not None)
-
-
-def mark_completion_receipt_sent(delegation_id: str, claim_id: str) -> bool:
-    """Record a visible receipt while preserving the pending synthesis claim."""
-    now = time.time()
-    with _DB_LOCK, _connect() as conn:
-        cur = conn.execute(
-            """UPDATE async_delegations SET receipt_sent_at=?, updated_at=?
-               WHERE delegation_id=? AND delivery_state='pending'
-                 AND delivery_claim=? AND receipt_sent_at IS NULL""",
-            (now, now, delegation_id, claim_id),
-        )
-        return cur.rowcount == 1
-
-
 def complete_completion_delivery(delegation_id: str, claim_id: str) -> bool:
     """Acknowledge acceptance for the consumer holding this claim."""
     now = time.time()
@@ -387,8 +362,7 @@ def get_durable_delegation(delegation_id: str) -> Optional[Dict[str, Any]]:
     with _DB_LOCK, _connect() as conn:
         row = conn.execute(
             """SELECT origin_session, state, dispatched_at, completed_at,
-                      result_json, delivery_state, delivery_attempts,
-                      receipt_sent_at
+                      result_json, delivery_state, delivery_attempts
                FROM async_delegations WHERE delegation_id=?""", (delegation_id,),
         ).fetchone()
     if row is None:
@@ -398,7 +372,6 @@ def get_durable_delegation(delegation_id: str) -> Optional[Dict[str, Any]]:
         "dispatched_at": row[2], "completed_at": row[3],
         "result": json.loads(row[4]) if row[4] else None,
         "delivery_state": row[5], "delivery_attempts": row[6],
-        "receipt_sent_at": row[7],
     }
 
 
