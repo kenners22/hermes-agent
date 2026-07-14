@@ -2989,6 +2989,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._completion_delivery_lock = threading.Lock()
         self._completion_deliveries_inflight: set[tuple[str, str, object]] = set()
         self._completion_deliveries_delivered: "OrderedDict[tuple[str, str, object], None]" = OrderedDict()
+        self._completion_receipts_sent: "OrderedDict[tuple[str, str, object], None]" = OrderedDict()
         self._completion_delivery_retention = 2048
 
         # Cache AIAgent instances per session to preserve prompt caching.
@@ -15357,6 +15358,83 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return (evt_type, producer_id, started_at)
         return None
 
+    async def _async_completion_parent_is_live(self, evt: dict) -> bool:
+        """Fail closed when a pinned delegation parent was ended or removed."""
+        parent_session_id = str(evt.get("parent_session_id") or "").strip()
+        if not parent_session_id:
+            return True
+        session_db = getattr(self, "_session_db", None)
+        if session_db is None:
+            logger.warning(
+                "Cannot verify async completion parent %s; suppressing delivery",
+                parent_session_id,
+            )
+            return False
+        try:
+            parent_row = await session_db.get_session(parent_session_id)
+        except Exception as exc:
+            logger.warning(
+                "Cannot read async completion parent %s: %s",
+                parent_session_id, exc,
+            )
+            return False
+        if parent_row is None or parent_row.get("ended_at"):
+            logger.info(
+                "Suppressing async completion for ended/unknown parent session %s",
+                parent_session_id,
+            )
+            return False
+        return True
+
+    @staticmethod
+    def _format_async_delegation_receipt(evt: dict) -> str:
+        """Return a bounded receipt without exposing untrusted child output."""
+        results = evt.get("results") or []
+        goals = evt.get("goals") or []
+        count = len(results) or len(goals) or 1
+        noun = "subagent" if count == 1 else "subagents"
+        status = str(evt.get("status") or "").lower()
+        if status in {"completed", "success"}:
+            return f"✅ {count} {noun} completed. Reviewing the findings now."
+        return (
+            f"⚠️ {count} {noun} finished with an issue. "
+            "Reviewing the available findings now."
+        )
+
+    async def _send_async_delegation_receipt(self, evt: dict) -> Optional[bool]:
+        """Send a thread-correct Telegram receipt before parent synthesis."""
+        self._enrich_async_delegation_routing(evt)
+        source = self._build_process_event_source(evt)
+        if not source:
+            return None
+        platform_name = (
+            source.platform.value
+            if hasattr(source.platform, "value")
+            else str(source.platform)
+        )
+        if platform_name != "telegram":
+            return None
+        adapter = next(
+            (a for p, a in self.adapters.items() if p.value == platform_name),
+            None,
+        )
+        sender = getattr(adapter, "_send_with_retry", None) if adapter else None
+        if not callable(sender):
+            logger.debug(
+                "Telegram async-completion receipt unavailable: no compatible sender"
+            )
+            return None
+        send_result = sender(
+            chat_id=source.chat_id,
+            content=self._format_async_delegation_receipt(evt),
+            reply_to=None,
+            metadata=self._thread_metadata_for_source(source),
+        )
+        if not inspect.isawaitable(send_result):
+            return None
+        await send_result
+        return True
+
     async def _deliver_completion_notification(
         self, synth_text: str, evt: dict,
     ) -> Optional[bool]:
@@ -15388,6 +15466,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         durable_delegation_id, exc,
                     )
                     return False
+            if not await self._async_completion_parent_is_live(evt):
+                if durable_claim_id:
+                    try:
+                        from tools.async_delegation import complete_completion_delivery
+
+                        complete_completion_delivery(
+                            durable_delegation_id, durable_claim_id,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Could not close unroutable async completion %s: %s",
+                            durable_delegation_id, exc,
+                        )
+                return None
         if identity is not None:
             with self._completion_delivery_lock:
                 if (
@@ -15399,6 +15491,44 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         accepted = False
         try:
+            receipt_already_sent = bool(
+                identity is not None and identity in self._completion_receipts_sent
+            )
+            if durable_claim_id and not receipt_already_sent:
+                try:
+                    from tools.async_delegation import completion_receipt_sent
+
+                    receipt_already_sent = completion_receipt_sent(
+                        durable_delegation_id
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Could not read async completion receipt state %s: %s",
+                        durable_delegation_id, exc,
+                    )
+            if evt.get("type") == "async_delegation" and not receipt_already_sent:
+                receipt_sent = await self._send_async_delegation_receipt(evt)
+                if receipt_sent is True:
+                    if identity is not None:
+                        self._completion_receipts_sent[identity] = None
+                        while (
+                            len(self._completion_receipts_sent)
+                            > self._completion_delivery_retention
+                        ):
+                            self._completion_receipts_sent.popitem(last=False)
+                    if durable_claim_id:
+                        try:
+                            from tools.async_delegation import mark_completion_receipt_sent
+
+                            mark_completion_receipt_sent(
+                                durable_delegation_id, durable_claim_id,
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "Could not persist async completion receipt %s: %s",
+                                durable_delegation_id, exc,
+                            )
+
             injection_result = await self._inject_watch_notification(synth_text, evt)
             if injection_result is not True:
                 return injection_result

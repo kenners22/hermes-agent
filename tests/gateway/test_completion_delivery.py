@@ -34,9 +34,16 @@ def isolated_registry(tmp_path, monkeypatch):
 
 
 def _runner(adapter, *, origins=None):
+    if not hasattr(adapter, "_send_with_retry"):
+        adapter._send_with_retry = AsyncMock()
     runner = object.__new__(GatewayRunner)
     runner._running = True
     runner.adapters = {Platform.TELEGRAM: adapter}
+    object.__setattr__(
+        runner,
+        "_session_db",
+        SimpleNamespace(get_session=AsyncMock(return_value={"ended_at": None})),
+    )
     runner.session_store = SimpleNamespace(
         _ensure_loaded=lambda: None,
         _entries=origins or {},
@@ -45,6 +52,7 @@ def _runner(adapter, *, origins=None):
     runner._completion_delivery_lock = __import__("threading").Lock()
     runner._completion_deliveries_inflight = set()
     runner._completion_deliveries_delivered = OrderedDict()
+    runner._completion_receipts_sent = OrderedDict()
     runner._completion_delivery_retention = 2048
     return runner
 
@@ -110,6 +118,7 @@ def test_duplicate_async_queue_replay_injects_once(monkeypatch, isolated_registr
     asyncio.run(runner._async_delegation_watcher(interval=0))
 
     adapter.handle_message.assert_awaited_once()
+    adapter._send_with_retry.assert_awaited_once()
 
 
 def test_unroutable_async_event_is_not_requeued_forever(
@@ -183,7 +192,85 @@ def test_failed_async_injection_is_retried_and_only_success_is_acked(
     asyncio.run(runner._async_delegation_watcher(interval=0))
 
     assert adapter.handle_message.await_count == 2
+    adapter._send_with_retry.assert_awaited_once()
     assert acknowledgements == ["deleg_duplicate"]
+
+
+def test_async_receipt_is_thread_correct_and_precedes_parent_synthesis():
+    timeline = []
+
+    async def _receipt(**kwargs):
+        timeline.append(("receipt", kwargs))
+
+    async def _inject(_event):
+        timeline.append(("synthesis", None))
+
+    adapter = SimpleNamespace(
+        _send_with_retry=AsyncMock(side_effect=_receipt),
+        handle_message=AsyncMock(side_effect=_inject),
+    )
+    session_key = "agent:main:telegram:group:-1003956661183:678"
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="-1003956661183",
+        chat_type="group",
+        thread_id="678",
+    )
+    runner = _runner(
+        adapter,
+        origins={session_key: SimpleNamespace(origin=source)},
+    )
+
+    event = _async_event()
+    event["session_key"] = session_key
+    assert asyncio.run(
+        runner._deliver_completion_notification("completion", event)
+    ) is True
+
+    assert [kind for kind, _ in timeline] == ["receipt", "synthesis"]
+    sent = timeline[0][1]
+    assert sent["chat_id"] == "-1003956661183"
+    assert sent["metadata"]["thread_id"] == "678"
+    assert sent["content"] == (
+        "✅ 1 subagent completed. Reviewing the findings now."
+    )
+
+
+def test_ended_parent_suppresses_receipt_and_synthesis():
+    adapter = SimpleNamespace(
+        _send_with_retry=AsyncMock(),
+        handle_message=AsyncMock(),
+    )
+    runner = _runner(adapter)
+    object.__setattr__(
+        runner,
+        "_session_db",
+        SimpleNamespace(
+            get_session=AsyncMock(return_value={"ended_at": 1234.0}),
+        ),
+    )
+
+    event = _async_event()
+    event["parent_session_id"] = "ended-parent"
+    assert asyncio.run(
+        runner._deliver_completion_notification("completion", event)
+    ) is None
+
+    adapter._send_with_retry.assert_not_awaited()
+    adapter.handle_message.assert_not_awaited()
+
+
+def test_batch_receipt_reports_child_count_without_child_output():
+    event = _async_event()
+    event["results"] = [
+        {"summary": "secret child output one"},
+        {"summary": "secret child output two"},
+    ]
+
+    receipt = GatewayRunner._format_async_delegation_receipt(event)
+
+    assert receipt == "✅ 2 subagents completed. Reviewing the findings now."
+    assert "secret child output" not in receipt
 
 
 def test_distinct_process_incarnations_are_not_deduplicated():

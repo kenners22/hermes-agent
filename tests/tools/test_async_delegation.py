@@ -238,16 +238,29 @@ def test_completion_is_persisted_and_delivery_can_be_acknowledged(tmp_path, monk
     restored = queue.Queue()
     assert ad.restore_undelivered_completions(restored) == 1
     row = ad.get_durable_delegation(dispatched["delegation_id"])
+    assert row is not None
     assert row["origin_session"] == "owner"
     assert row["state"] == "completed"
     assert row["result"]["summary"] == "survived"
     assert row["delivery_state"] == "pending"
     # Queue publication/restoration is not a destination delivery attempt.
     assert row["delivery_attempts"] == 0
+    assert row["receipt_sent_at"] is None
+
+    claim_id = "gateway:test"
+    assert ad.claim_completion_delivery(dispatched["delegation_id"], claim_id)
+    assert ad.mark_completion_receipt_sent(dispatched["delegation_id"], claim_id)
+    assert ad.completion_receipt_sent(dispatched["delegation_id"])
+    receipt_row = ad.get_durable_delegation(dispatched["delegation_id"])
+    assert receipt_row is not None
+    assert receipt_row["receipt_sent_at"]
+    assert ad.release_completion_delivery(dispatched["delegation_id"], claim_id)
 
     assert ad.mark_completion_delivered(dispatched["delegation_id"])
     assert ad.restore_undelivered_completions(queue.Queue()) == 0
-    assert ad.get_durable_delegation(dispatched["delegation_id"])["delivery_state"] == "delivered"
+    delivered_row = ad.get_durable_delegation(dispatched["delegation_id"])
+    assert delivered_row is not None
+    assert delivered_row["delivery_state"] == "delivered"
 
 
 def test_real_process_restart_restores_owned_completion_once(tmp_path):
