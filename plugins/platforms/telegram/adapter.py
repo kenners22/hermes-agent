@@ -521,6 +521,11 @@ class TelegramAdapter(BasePlatformAdapter):
         # as plain text, which is worse than degraded table/task-list rendering
         # for command snippets and mobile handoffs.
         self._rich_messages_enabled: bool = self._coerce_bool_extra("rich_messages", False)
+        # Pipe tables used to auto-route through Bot API 10.1 rich messages even
+        # when rich_messages was off. Keep that legacy behaviour by default, but
+        # allow profiles/users who dislike Telegram's font/layout changes to opt
+        # out via platforms.telegram.extra.rich_tables: false.
+        self._rich_tables_enabled: bool = self._coerce_bool_extra("rich_tables", True)
         # Rich draft previews use a separate opt-in. Telegram macOS / Desktop
         # can leave Bot API 10.1 rich draft frames visually overlaid until the
         # chat is redrawn, while final rich messages remain useful.
@@ -1402,6 +1407,8 @@ class TelegramAdapter(BasePlatformAdapter):
         regression when users enable Telegram Topics and expect native tables.
         Task lists, ``<details>``, and block math still require the full opt-in.
         """
+        if not getattr(self, "_rich_tables_enabled", True):
+            return False
         if not content or not any(
             _TABLE_SEPARATOR_RE.match(line) for line in content.splitlines()
         ):
