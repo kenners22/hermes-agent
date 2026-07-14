@@ -1,3 +1,6 @@
+import ast
+from pathlib import Path
+
 import pytest
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
@@ -60,3 +63,23 @@ async def test_gateway_goal_uses_goals_max_turns_from_full_config(tmp_path, monk
         assert state.max_turns == 7
     finally:
         goals._DB_CACHE.clear()
+
+
+def test_all_gateway_goal_manager_calls_await_async_boundary():
+    """Every slash-command caller must await the async goal/session lookup."""
+    path = Path(__file__).resolve().parents[2] / "gateway" / "slash_commands.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_get_goal_manager_for_event"
+    ]
+    assert len(calls) == 2
+    assert all(isinstance(parents.get(call), ast.Await) for call in calls)

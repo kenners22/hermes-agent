@@ -2175,7 +2175,7 @@ class GatewaySlashCommandsMixin:
         args = (event.get_command_args() or "").strip()
         lower = args.lower()
 
-        mgr, session_entry = self._get_goal_manager_for_event(event)
+        mgr, session_entry = await self._get_goal_manager_for_event(event)
         if mgr is None:
             return t("gateway.goal.unavailable")
 
@@ -2309,7 +2309,7 @@ class GatewaySlashCommandsMixin:
         to invoke while the agent is running.
         """
         args = (event.get_command_args() or "").strip()
-        mgr, _session_entry = self._get_goal_manager_for_event(event)
+        mgr, _session_entry = await self._get_goal_manager_for_event(event)
         if mgr is None:
             return t("gateway.goal.unavailable")
         if not mgr.has_goal():
