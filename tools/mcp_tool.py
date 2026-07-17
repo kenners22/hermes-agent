@@ -19,6 +19,8 @@ Example config::
         env: {}
         timeout: 120         # per-tool-call timeout in seconds (default: 300)
         connect_timeout: 60  # initial connection timeout (default: 60)
+        runtime_contexts: [gateway]  # optional: only start in selected Hermes
+                                     # process types: gateway, cli, cron, acp, tui
         keepalive_interval: 10  # liveness ping cadence in seconds (default:
                                 # 180). Set below the server's session TTL for
                                 # servers that GC idle sessions quickly (e.g.
@@ -3748,7 +3750,8 @@ def _load_mcp_config() -> Dict[str, dict]:
     Returns a dict of ``{server_name: server_config}`` or empty dict.
     Server config can contain either ``command``/``args``/``env`` for stdio
     transport or ``url``/``headers`` for HTTP transport, plus optional
-    ``timeout``, ``connect_timeout``, and ``auth`` overrides.
+    ``timeout``, ``connect_timeout``, ``auth``, and ``runtime_contexts``
+    overrides.
 
     ``${ENV_VAR}`` placeholders in string values are resolved from
     ``os.environ`` (which includes ``~/.hermes/.env`` loaded at startup).
@@ -3778,6 +3781,76 @@ def _load_mcp_config() -> Dict[str, dict]:
     except Exception as exc:
         logger.debug("Failed to load MCP config: %s", exc)
         return {}
+
+
+def _detect_mcp_runtime_context() -> str:
+    """Return the process-level Hermes runtime that is discovering MCP servers.
+
+    MCP discovery happens before an individual conversation exists, so process
+    argv is the stable source of truth. This deliberately keeps a long-lived
+    gateway distinct from short-lived CLI/cron agents that may share the same
+    profile config.
+    """
+    args = [str(arg).strip().lower() for arg in sys.argv[1:]]
+
+    def _has_pair(command: str, action: str) -> bool:
+        return any(
+            token == command and index + 1 < len(args) and args[index + 1] == action
+            for index, token in enumerate(args)
+        )
+
+    if _has_pair("gateway", "run"):
+        return "gateway"
+    if _has_pair("cron", "run") or _has_pair("cron", "tick"):
+        return "cron"
+    if os.environ.get("HERMES_CRON_SESSION") == "1":
+        return "cron"
+    if "acp" in args:
+        return "acp"
+    if os.environ.get("HERMES_TUI") == "1":
+        return "tui"
+    return "cli"
+
+
+def _filter_mcp_servers_for_runtime_context(
+    servers: Dict[str, dict], runtime_context: str
+) -> Dict[str, dict]:
+    """Filter servers by optional ``runtime_contexts`` config.
+
+    Unscoped servers preserve the existing all-runtimes behavior. A scoped
+    server starts only in a named process context (``gateway``, ``cli``,
+    ``cron``, ``acp``, or ``tui``); ``*`` explicitly allows every context.
+    Invalid or empty explicit scopes fail closed so a typo cannot launch a
+    sensitive MCP server in an unintended short-lived process.
+    """
+    context = str(runtime_context).strip().lower()
+    filtered: Dict[str, dict] = {}
+    for name, cfg in servers.items():
+        raw_contexts = cfg.get("runtime_contexts")
+        if raw_contexts is None:
+            filtered[name] = cfg
+            continue
+        if isinstance(raw_contexts, str):
+            values = [raw_contexts]
+        elif isinstance(raw_contexts, (list, tuple, set)):
+            values = list(raw_contexts)
+        else:
+            logger.warning(
+                "Skipping MCP server '%s': runtime_contexts must be a string or list",
+                name,
+            )
+            continue
+        allowed = {str(value).strip().lower() for value in values if str(value).strip()}
+        if "*" in allowed or context in allowed:
+            filtered[name] = cfg
+        else:
+            logger.debug(
+                "Skipping MCP server '%s' in runtime context '%s' (allowed: %s)",
+                name,
+                context,
+                ", ".join(sorted(allowed)) or "none",
+            )
+    return filtered
 
 
 # ---------------------------------------------------------------------------
@@ -4890,9 +4963,12 @@ def register_mcp_servers(servers: Dict[str, dict]) -> List[str]:
         return []
 
     servers = _filter_suspicious_mcp_servers(servers)
+    servers = _filter_mcp_servers_for_runtime_context(
+        servers, _detect_mcp_runtime_context()
+    )
     if not servers:
-        logger.debug("No explicit MCP servers provided")
-        return []
+        logger.debug("No explicit MCP servers enabled for this runtime context")
+        return _existing_tool_names()
 
     # Only attempt servers that aren't already connected and are enabled
     # (enabled: false skips the server entirely without removing its config)
@@ -5013,6 +5089,12 @@ def discover_mcp_tools() -> List[str]:
     if not servers:
         logger.debug("No MCP servers configured")
         return []
+
+    runtime_context = _detect_mcp_runtime_context()
+    servers = _filter_mcp_servers_for_runtime_context(servers, runtime_context)
+    if not servers:
+        logger.debug("No MCP servers enabled for runtime context '%s'", runtime_context)
+        return _existing_tool_names()
 
     with _lock:
         new_server_names = [
