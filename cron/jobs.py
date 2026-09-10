@@ -2059,7 +2059,7 @@ def rearm_oneshot(job_id: str, run_at: Any) -> Optional[Dict[str, Any]]:
         save_jobs(jobs)
         return _normalize_job_record(job)
 
-    return _with_job(job_ref["id"], apply)
+    return _under_fire_fence(job_ref["id"], lambda: _with_job(job_ref["id"], apply))
 
 
 def remove_job(job_id: str) -> bool:

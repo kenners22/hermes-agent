@@ -559,6 +559,154 @@ def test_repeated_heartbeat_errors_cancel_after_bounded_grace(monkeypatch):
     assert calls >= 3
 
 
+def test_delivery_held_local_fire_fence_does_not_self_cancel_heartbeat(monkeypatch):
+    """A synchronous delivery holding this run's local fence must not make its heartbeat fail."""
+    import cron.scheduler as scheduler
+    from cron import scheduler_script as sched_script
+
+    delivery_active = threading.Event()
+    deliver_entered = threading.Event()
+    heartbeat_calls = 0
+
+    @contextlib.contextmanager
+    def contended_fence(*_args, **_kwargs):
+        delivery_active.set()
+        try:
+            yield True
+        finally:
+            delivery_active.clear()
+
+    def heartbeat(*_args, **_kwargs):
+        nonlocal heartbeat_calls
+        heartbeat_calls += 1
+        if delivery_active.is_set():
+            raise AssertionError("same-run local fence contention reached durable heartbeat")
+        return True
+
+    def deliver(*_args, **_kwargs):
+        deliver_entered.set()
+        assert delivery_active.is_set()
+        time.sleep(0.08)
+        return None
+
+    finish = MagicMock()
+    mark_run = MagicMock(return_value=True)
+    job = {
+        "id": "same-run-fence",
+        "execution_id": "same-run-execution",
+        "name": "same-run-fence",
+        "fire_claim": {"at": "2026-07-12T12:00:00+00:00", "by": "owner"},
+    }
+    monkeypatch.setattr(scheduler, "_RUN_CLAIM_HEARTBEAT_SECONDS", 0.01)
+    monkeypatch.setattr(scheduler, "_FIRE_CLAIM_HEARTBEAT_GRACE_SECONDS", 0.03)
+    monkeypatch.setattr(scheduler, "heartbeat_fire_claim", heartbeat)
+    monkeypatch.setattr(scheduler, "claim_dispatch", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(scheduler, "mark_execution_running", lambda *_args: {})
+    monkeypatch.setattr(
+        scheduler,
+        "run_job",
+        lambda *_args, **_kwargs: (True, "output", "response", None),
+    )
+    monkeypatch.setattr(scheduler, "fire_claim_fence", contended_fence, raising=False)
+    monkeypatch.setattr(scheduler, "save_job_output", lambda *_args: "output.md")
+    monkeypatch.setattr(scheduler, "_deliver_result", deliver)
+    monkeypatch.setattr(scheduler, "mark_job_run", mark_run)
+    monkeypatch.setattr(scheduler, "finish_execution", finish)
+
+    with patch("agent.secret_scope.set_secret_scope", return_value=None), \
+         patch("agent.secret_scope.build_profile_secret_scope", return_value=None), \
+         patch("agent.secret_scope.reset_secret_scope"):
+        assert scheduler.run_one_job(job) is True
+
+    assert deliver_entered.is_set()
+    assert heartbeat_calls >= 1
+    mark_run.assert_called_once_with(
+        "same-run-fence",
+        True,
+        None,
+        delivery_error=None,
+        expected_fire_owner="owner",
+    )
+    finish.assert_called_once_with(
+        "same-run-execution",
+        success=True,
+        error=None,
+        delivery_outcome="suppressed",
+    )
+
+
+def test_local_fire_fence_holders_are_scoped_by_profile_home(tmp_path, monkeypatch):
+    import cron.scheduler as scheduler
+
+    owner = "owner"
+    job_id = "same-job"
+    profile_a = tmp_path / "profile-a"
+    profile_b = tmp_path / "profile-b"
+    profile_a.mkdir()
+    profile_b.mkdir()
+
+    monkeypatch.setattr(scheduler, "_get_hermes_home", lambda: profile_a)
+    with scheduler._record_local_fire_fence(job_id, owner):
+        assert scheduler._same_run_holds_local_fire_fence(job_id, owner) is True
+        monkeypatch.setattr(scheduler, "_get_hermes_home", lambda: profile_b)
+        assert scheduler._same_run_holds_local_fire_fence(job_id, owner) is False
+        monkeypatch.setattr(scheduler, "_get_hermes_home", lambda: profile_a)
+
+    assert scheduler._same_run_holds_local_fire_fence(job_id, owner) is False
+
+
+def test_ownership_loss_after_delivery_fence_still_fails_closed(monkeypatch):
+    """The local-fence bypass must not mask a real durable owner loss after side effects."""
+    import cron.scheduler as scheduler
+    from cron import scheduler_script as sched_script
+
+    heartbeat_calls = 0
+
+    def heartbeat(*_args, **_kwargs):
+        nonlocal heartbeat_calls
+        heartbeat_calls += 1
+        return heartbeat_calls <= 3
+
+    finish = MagicMock()
+    mark_run = MagicMock()
+
+    @contextlib.contextmanager
+    def owned_fence(*_args, **_kwargs):
+        yield True
+
+    job = {
+        "id": "durable-owner-lost",
+        "execution_id": "lost-execution",
+        "name": "durable-owner-lost",
+        "fire_claim": {"at": "2026-07-12T12:00:00+00:00", "by": "owner"},
+    }
+    monkeypatch.setattr(scheduler, "heartbeat_fire_claim", heartbeat)
+    monkeypatch.setattr(scheduler, "claim_dispatch", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(scheduler, "mark_execution_running", lambda *_args: {})
+    monkeypatch.setattr(
+        scheduler,
+        "run_job",
+        lambda *_args, **_kwargs: (True, "output", "response", None),
+    )
+    monkeypatch.setattr(scheduler, "fire_claim_fence", owned_fence, raising=False)
+    monkeypatch.setattr(scheduler, "save_job_output", lambda *_args: "output.md")
+    monkeypatch.setattr(scheduler, "_deliver_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scheduler, "mark_job_run", mark_run)
+    monkeypatch.setattr(scheduler, "finish_execution", finish)
+
+    with patch("agent.secret_scope.set_secret_scope", return_value=None), \
+         patch("agent.secret_scope.build_profile_secret_scope", return_value=None), \
+         patch("agent.secret_scope.reset_secret_scope"):
+        assert scheduler.run_one_job(job) is True
+
+    mark_run.assert_not_called()
+    finish.assert_called_once_with(
+        "lost-execution",
+        success=False,
+        error="Fire claim ownership lost; stale result was discarded.",
+    )
+
+
 def test_terminal_owner_cas_failure_marks_ledger_ownership_lost(monkeypatch):
     """A replacement owner cannot leave the stale ledger recorded as success."""
     import cron.scheduler as scheduler

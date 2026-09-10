@@ -515,6 +515,8 @@ _running_fire_owners: dict[str, dict[object, tuple[Optional[str], Path]]] = {}
 # process sweep cannot reach the worker's transient scope.
 _restart_safe_waiter_job_ids: set[str] = set()
 _running_lock = threading.Lock()
+_local_fire_fence_holders: dict[tuple[Path, str, str], int] = {}
+_local_fire_fence_holders_lock = threading.Lock()
 
 # Per in-flight id: time.time() claim instant + the future owning its release (``_FUTURE_PENDING``
 # until pool.submit returns). Past-allowance with no live future = leak; the sweep force-releases.
@@ -2450,6 +2452,9 @@ def _run_with_fire_claim_heartbeat(job: dict, run) -> bool:
     def _heartbeat_loop() -> None:
         last_confirmed = time.monotonic()
         while not stop.wait(_RUN_CLAIM_HEARTBEAT_SECONDS):
+            if _same_run_holds_local_fire_fence(job_id, owner):
+                last_confirmed = time.monotonic()
+                continue
             try:
                 if not heartbeat_fire_claim(job_id, expected_owner=owner):
                     lost_ownership.set()
@@ -2564,6 +2569,41 @@ def run_one_job(
 _OWNERSHIP_LOST_INTERRUPTED = "Interrupted by shutdown before terminal completion."
 
 
+def _local_fire_fence_key(job_id: str, owner: str) -> tuple[Path, str, str]:
+    return (_get_hermes_home().resolve(), job_id, owner)
+
+
+@contextlib.contextmanager
+def _record_local_fire_fence(job_id: str, owner: str):
+    key = _local_fire_fence_key(job_id, owner)
+    with _local_fire_fence_holders_lock:
+        _local_fire_fence_holders[key] = _local_fire_fence_holders.get(key, 0) + 1
+    try:
+        yield
+    finally:
+        with _local_fire_fence_holders_lock:
+            count = _local_fire_fence_holders.get(key, 0)
+            if count <= 1:
+                _local_fire_fence_holders.pop(key, None)
+            else:
+                _local_fire_fence_holders[key] = count - 1
+
+
+def _same_run_holds_local_fire_fence(job_id: str, owner: str) -> bool:
+    with _local_fire_fence_holders_lock:
+        return _local_fire_fence_holders.get(_local_fire_fence_key(job_id, owner), 0) > 0
+
+
+@contextlib.contextmanager
+def _owned_local_fire_fence(job_id: str, owner: str):
+    with fire_claim_fence(job_id, expected_owner=owner) as owns_claim:
+        if not owns_claim:
+            yield False
+            return
+        with _record_local_fire_fence(job_id, owner):
+            yield True
+
+
 def _record_fire_ownership_lost(job_id: str, fire_owner: Optional[str], execution_id: str) -> None:
     """Bookkeeping after fire-claim ownership loss. A transport-level cancel (dashboard drain) is
     not a real loss — we still own the claim, so record the interruption via the owner-fenced
@@ -2656,7 +2696,7 @@ class _FireOwnership:
     def side_effect_fence(self):
         if self.owner is None:
             return contextlib.nullcontext(True)
-        return fire_claim_fence(self.job["id"], expected_owner=self.owner)
+        return _owned_local_fire_fence(self.job["id"], self.owner)
 
     def lost(self) -> bool:
         if self.fire_claim_lost is not None and self.fire_claim_lost.is_set():

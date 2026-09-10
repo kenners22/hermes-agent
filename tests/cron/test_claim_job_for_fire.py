@@ -217,6 +217,40 @@ def test_fire_claim_fence_rejects_stale_owner(temp_home):
         assert owns_claim is False
 
 
+def test_rearm_oneshot_waits_for_inflight_fire_fence(temp_home):
+    """Re-arm may clear an expired fire_claim only after the active owner fence exits."""
+    from datetime import datetime, timedelta, timezone
+
+    import cron.jobs as jobs
+
+    job = jobs.create_job(prompt="x", schedule="in 30m", name="rearm-fenced")
+    stale_claim_at = (datetime.now(timezone.utc) - timedelta(seconds=301)).isoformat()
+    records = jobs.load_jobs()
+    records[0]["fire_claim"] = {"at": stale_claim_at, "by": "owner"}
+    jobs.save_jobs(records)
+
+    rearmed = threading.Event()
+    result = {}
+
+    def rearm():
+        result["job"] = jobs.rearm_oneshot(job["id"], "in 45m")
+        rearmed.set()
+
+    with jobs._fire_job_lock(job["id"]) as acquired:
+        assert acquired is True
+        thread = threading.Thread(target=rearm)
+        thread.start()
+        time.sleep(0.05)
+        assert rearmed.is_set() is False
+        assert jobs.get_job(job["id"])["fire_claim"]["by"] == "owner"
+
+    thread.join(timeout=2)
+    assert thread.is_alive() is False
+    assert rearmed.is_set() is True
+    assert result["job"]["fire_claim"] is None
+    assert result["job"]["state"] == "scheduled"
+
+
 def test_same_process_fire_fence_refuses_second_claim_after_timeout(temp_home, monkeypatch):
     """A wedged local holder must not indefinitely block another claimant."""
     import cron.jobs as jobs
