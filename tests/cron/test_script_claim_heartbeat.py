@@ -528,12 +528,21 @@ def test_heartbeat_thread_start_failure_does_not_start_execution(monkeypatch):
     )
 
 
-def test_repeated_heartbeat_errors_cancel_after_bounded_grace(monkeypatch):
+def test_repeated_heartbeat_errors_cancel_after_bounded_grace(monkeypatch, caplog):
     """Store uncertainty cannot let a run outlive its last confirmed lease forever."""
     import cron.scheduler as scheduler
     from cron import scheduler_script as sched_script
 
     calls = 0
+    monotonic_values = [100.0, 100.01, 100.04]
+    monotonic_calls = 0
+    body_saw_loss = threading.Event()
+
+    def monotonic():
+        nonlocal monotonic_calls
+        value = monotonic_values[min(monotonic_calls, len(monotonic_values) - 1)]
+        monotonic_calls += 1
+        return value
 
     def heartbeat(*_args, **_kwargs):
         nonlocal calls
@@ -544,6 +553,7 @@ def test_repeated_heartbeat_errors_cancel_after_bounded_grace(monkeypatch):
 
     def run_body(_job, **kwargs):
         assert kwargs["fire_claim_lost"].wait(timeout=0.5)
+        body_saw_loss.set()
         return True
 
     job = {
@@ -554,9 +564,16 @@ def test_repeated_heartbeat_errors_cancel_after_bounded_grace(monkeypatch):
     monkeypatch.setattr(scheduler, "_run_one_job_body", run_body)
     monkeypatch.setattr(scheduler, "_RUN_CLAIM_HEARTBEAT_SECONDS", 0.01)
     monkeypatch.setattr(scheduler, "_FIRE_CLAIM_HEARTBEAT_GRACE_SECONDS", 0.03)
+    monkeypatch.setattr(scheduler.time, "monotonic", monotonic)
 
+    caplog.set_level("WARNING", logger=scheduler.logger.name)
     assert scheduler.run_one_job(job) is True
+    assert body_saw_loss.is_set()
     assert calls >= 3
+    assert (
+        "Job 'heartbeat-errors': fire_claim could not be renewed within 0.0s; "
+        "interrupting uncertain run"
+    ) in caplog.text
 
 
 def test_delivery_held_local_fire_fence_does_not_self_cancel_heartbeat(monkeypatch):
