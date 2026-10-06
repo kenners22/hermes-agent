@@ -113,6 +113,13 @@ COMMAND_REGISTRY: list[CommandDef] = [
                args_hint="<prompt>"),
     CommandDef("goal", "Set a standing goal Hermes works on across turns until achieved", "Session",
                args_hint="[text | draft <text> | show | pause | resume | clear | status | wait <pid> | unwait]"),
+    CommandDef(
+        "quality-loop",
+        "Improve a real artifact through a persistent consumer/seller 90+ quality loop",
+        "Session",
+        aliases=("ql",),
+        args_hint="<artifact/path/URL/objective | status|show|pause|resume|clear>",
+    ),
     CommandDef("moa", "Run one prompt through the default Mixture of Agents preset, then restore your model", "Session",
                args_hint="<prompt>"),
     CommandDef("subgoal", "Add or manage extra criteria on the active goal", "Session",
@@ -1163,7 +1170,11 @@ _SLACK_PRIORITY_ALIASES = ("btw", "bg")
 #   - moa: high-cost slash mode, available through /hermes moa to avoid
 #     displacing existing native Slack slash commands at the 50-command cap.
 #   - debug: the log/report upload surface; reached via /hermes debug on Slack.
-_SLACK_VIA_HERMES_ONLY = frozenset({"credits", "billing", "moa", "debug"})
+#   - quality-loop/ql: specialized persistent quality preset; reached via
+#     /hermes quality-loop on Slack so it does not displace an existing native command.
+_SLACK_VIA_HERMES_ONLY = frozenset(
+    {"credits", "billing", "moa", "debug", "quality-loop", "ql"}
+)
 
 
 def _sanitize_slack_name(raw: str) -> str:

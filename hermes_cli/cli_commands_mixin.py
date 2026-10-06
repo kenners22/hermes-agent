@@ -1995,6 +1995,57 @@ class CLICommandsMixin:
             print("   status       Show current browser mode")
             print()
 
+    def _handle_quality_loop_command(self, cmd: str) -> None:
+        """Start the dual-perspective quality preset on the persistent goal engine."""
+        from cli import _DIM, _RST, _cprint
+        from hermes_cli.quality_loop import (
+            QualityLoopUnavailable,
+            is_quality_loop_control,
+            quality_loop_usage,
+            start_quality_loop,
+        )
+
+        parts = (cmd or "").strip().split(None, 1)
+        arg = parts[1].strip() if len(parts) > 1 else ""
+        if is_quality_loop_control(arg):
+            self._handle_goal_command(f"/goal {arg}")
+            return
+        if not arg:
+            _cprint(f"  {quality_loop_usage()}")
+            return
+
+        mgr = self._get_goal_manager()
+        if mgr is None:
+            _cprint(f"  {_DIM}Quality loop unavailable (no active session).{_RST}")
+            return
+
+        try:
+            state, kickoff = start_quality_loop(
+                mgr,
+                arg,
+                task_id=getattr(self, "session_id", None),
+            )
+        except (QualityLoopUnavailable, ValueError) as exc:
+            _cprint(f"  Quality loop unavailable: {exc}")
+            return
+
+        try:
+            self._pending_input.put(kickoff)
+        except Exception as exc:
+            mgr.clear()
+            _cprint(
+                "  Quality loop not started: the kickoff could not be queued; "
+                f"goal state was rolled back ({exc})."
+            )
+            return
+
+        _cprint(f"  ⟳ Quality loop set ({state.max_turns}-turn budget): {arg}")
+        _cprint(
+            f"  {_DIM}Consumer ≥90 · Seller ≥90 · category floors and hard gates "
+            f"enforced by the persistent /goal judge. Controls: /quality-loop "
+            f"status · show · pause · resume · clear.{_RST}"
+        )
+
     def _handle_goal_command(self, cmd: str) -> None:
         """Dispatch /goal subcommands: set / draft / show / status / pause / resume / clear."""
         from cli import _DIM, _RST, _cprint

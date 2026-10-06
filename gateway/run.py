@@ -9333,6 +9333,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     return await self._handle_goal_command(event)
                 return "Agent is running — use /goal status / pause / clear / wait mid-run, or /stop before setting a new goal."
 
+            if _cmd_def_inner and _cmd_def_inner.name == "quality-loop":
+                from hermes_cli.quality_loop import is_quality_loop_control
+
+                _quality_arg = (event.get_command_args() or "").strip()
+                if not _quality_arg or is_quality_loop_control(_quality_arg):
+                    return await self._handle_quality_loop_command(event)
+                return (
+                    "Agent is running — use /quality-loop status / pause / clear "
+                    "mid-run, or /stop before starting a new quality loop."
+                )
+
             if _cmd_def_inner and _cmd_def_inner.name == "moa":
                 return "Agent is running — wait or /stop first, then run /moa."
 
@@ -9855,6 +9866,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical == "goal":
             return await self._handle_goal_command(event)
+
+        if canonical == "quality-loop":
+            return await self._handle_quality_loop_command(event)
 
         if canonical == "moa":
             # /moa is one-shot sugar only: run a single prompt through the

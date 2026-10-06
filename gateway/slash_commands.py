@@ -2161,6 +2161,70 @@ class GatewaySlashCommandsMixin:
         # Let the normal message handler process it
         return await self._handle_message(retry_event)
 
+    async def _handle_quality_loop_command(self, event: "MessageEvent") -> str:
+        """Start the quality preset on the existing persistent /goal engine."""
+        from hermes_cli.quality_loop import (
+            QualityLoopUnavailable,
+            is_quality_loop_control,
+            quality_loop_usage,
+            start_quality_loop,
+        )
+
+        args = (event.get_command_args() or "").strip()
+        if is_quality_loop_control(args):
+            return await self._handle_goal_command(event)
+        if not args:
+            return quality_loop_usage()
+
+        mgr, session_entry = await self._get_goal_manager_for_event(event)
+        if mgr is None or session_entry is None:
+            return t("gateway.goal.unavailable")
+
+        platform = None
+        if event.source and event.source.platform:
+            platform = event.source.platform.value
+        try:
+            state, kickoff = start_quality_loop(
+                mgr,
+                args,
+                task_id=getattr(session_entry, "session_id", None),
+                platform=platform,
+            )
+        except (QualityLoopUnavailable, ValueError) as exc:
+            return f"Quality loop unavailable: {exc}"
+
+        adapter = self.adapters.get(event.source.platform) if event.source else None
+        quick_key = self._session_key_for_source(event.source) if event.source else None
+        if not adapter or not quick_key:
+            mgr.clear()
+            return (
+                "Quality loop not started: no active delivery queue was available; "
+                "goal state was rolled back."
+            )
+        try:
+            kickoff_event = MessageEvent(
+                text=kickoff,
+                message_type=MessageType.TEXT,
+                source=event.source,
+                message_id=event.message_id,
+                channel_prompt=event.channel_prompt,
+            )
+            self._enqueue_fifo(quick_key, kickoff_event, adapter)
+        except Exception as exc:
+            mgr.clear()
+            logger.warning("quality-loop kickoff enqueue failed: %s", exc)
+            return (
+                "Quality loop not started: the kickoff could not be queued; "
+                "goal state was rolled back."
+            )
+
+        return (
+            f"⟳ Quality loop set ({state.max_turns}-turn budget): {args}\n"
+            "Consumer ≥90 · Seller ≥90 · category floors, hard gates and fresh "
+            "evidence are enforced by the persistent /goal judge.\n"
+            "Controls: /quality-loop status · show · pause · resume · clear"
+        )
+
     async def _handle_goal_command(self, event: "MessageEvent") -> str:
         """Handle /goal for gateway platforms.
 

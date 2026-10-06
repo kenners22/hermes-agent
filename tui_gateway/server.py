@@ -11531,6 +11531,8 @@ _PENDING_INPUT_COMMANDS: frozenset[str] = frozenset(
         "steer",
         "plan",
         "goal",
+        "quality-loop",
+        "ql",
         "moa",
         "undo",
         "learn",
@@ -11932,6 +11934,62 @@ def _(rid, params: dict) -> dict:
         # Fallback: no active run, treat as next-turn message
         return _ok(rid, {"type": "send", "message": arg})
 
+    if name == "quality-loop":
+        if not session:
+            return _err(rid, 4001, "no active session")
+        from hermes_cli.quality_loop import (
+            QualityLoopUnavailable,
+            is_quality_loop_control,
+            quality_loop_usage,
+            start_quality_loop,
+        )
+
+        if is_quality_loop_control(arg):
+            return _methods["command.dispatch"](
+                rid,
+                {
+                    "name": "goal",
+                    "arg": arg,
+                    "session_id": params.get("session_id", ""),
+                },
+            )
+        if not arg.strip():
+            return _ok(rid, {"type": "exec", "output": quality_loop_usage()})
+
+        try:
+            from hermes_cli.goals import GoalManager
+        except Exception as exc:
+            return _err(rid, 5030, f"goals unavailable: {exc}")
+        sid_key = session.get("session_key") or ""
+        if not sid_key:
+            return _err(rid, 4001, "no session key")
+        try:
+            goals_cfg = _load_cfg().get("goals") or {}
+            max_turns = int(goals_cfg.get("max_turns", 20) or 20)
+        except Exception:
+            max_turns = 20
+        mgr = GoalManager(session_id=sid_key, default_max_turns=max_turns)
+        try:
+            state, kickoff = start_quality_loop(
+                mgr,
+                arg,
+                task_id=sid_key,
+                platform="tui",
+            )
+        except (QualityLoopUnavailable, ValueError) as exc:
+            return _err(rid, 4004, f"quality loop unavailable: {exc}")
+
+        notice = (
+            f"⟳ Quality loop set ({state.max_turns}-turn budget): {arg}\n"
+            "Consumer ≥90 · Seller ≥90 · category floors, hard gates and fresh "
+            "evidence are enforced by the persistent /goal judge.\n"
+            "Controls: /quality-loop status · show · pause · resume · clear"
+        )
+        return _ok(
+            rid,
+            {"type": "send", "notice": notice, "message": kickoff},
+        )
+
     if name == "goal":
         if not session:
             return _err(rid, 4001, "no active session")
@@ -11954,6 +12012,25 @@ def _(rid, params: dict) -> dict:
         lower = arg.strip().lower()
         if not arg.strip() or lower == "status":
             return _ok(rid, {"type": "exec", "output": mgr.status_line()})
+        if lower == "show":
+            state = mgr.state
+            if state is None or not mgr.has_goal():
+                return _ok(rid, {"type": "exec", "output": "No active goal."})
+            contract_block = (
+                state.contract.render_block()
+                if state.has_contract()
+                else "(no completion contract)"
+            )
+            return _ok(
+                rid,
+                {
+                    "type": "exec",
+                    "output": (
+                        f"{mgr.status_line()}\n\n"
+                        f"Completion contract:\n{contract_block}"
+                    ),
+                },
+            )
         if lower == "pause":
             state = mgr.pause(reason="user-paused")
             out = "No goal set." if state is None else f"⏸ Goal paused: {state.goal}"
