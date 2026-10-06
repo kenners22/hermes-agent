@@ -69,8 +69,21 @@ class TestFetchOpenRouterModels:
             def read(self):
                 return b'{"data":[{"id":"anthropic/claude-opus-4.8","pricing":{"prompt":"0.000015","completion":"0.000075"}},{"id":"qwen/qwen3.7-max","pricing":{"prompt":"0.000000325","completion":"0.00000195"}},{"id":"nvidia/nemotron-3-super-120b-a12b:free","pricing":{"prompt":"0","completion":"0"}}]}'
 
+        # Pin the remote curated catalog. fetch_openrouter_models intersects
+        # this preferred list with the stubbed /v1/models payload; an unpinned
+        # manifest follows the live catalog and drops ids this fixture asserts.
         monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache", None)
-        with patch("hermes_cli.models._urlopen_model_catalog_request", return_value=_Resp()):
+        with (
+            patch(
+                "hermes_cli.model_catalog.get_curated_openrouter_models",
+                return_value=[
+                    ("anthropic/claude-opus-4.8", ""),
+                    ("qwen/qwen3.7-max", ""),
+                    ("nvidia/nemotron-3-super-120b-a12b:free", "free"),
+                ],
+            ),
+            patch("hermes_cli.models._urlopen_model_catalog_request", return_value=_Resp()),
+        ):
             models = fetch_openrouter_models(force_refresh=True)
 
         assert models == [
@@ -166,8 +179,19 @@ class TestFetchOpenRouterModels:
                     b']}'
                 )
 
+        # Same pin as test_live_fetch_recomputes_free_tags: the permissive
+        # path still intersects with the curated preferred list.
         monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache", None)
-        with patch("hermes_cli.models._urlopen_model_catalog_request", return_value=_Resp()):
+        with (
+            patch(
+                "hermes_cli.model_catalog.get_curated_openrouter_models",
+                return_value=[
+                    ("anthropic/claude-opus-4.8", ""),
+                    ("qwen/qwen3.7-max", ""),
+                ],
+            ),
+            patch("hermes_cli.models._urlopen_model_catalog_request", return_value=_Resp()),
+        ):
             models = fetch_openrouter_models(force_refresh=True)
 
         ids = [mid for mid, _ in models]
