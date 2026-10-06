@@ -1,0 +1,20 @@
+I have to flag a hard constraint up front: **Bash, Read, Grep, and Glob are all disabled in this session**, so I could not open the actual diff (`tests/cron/test_script_claim_heartbeat.py`), the production fence loop from `bf4de97d8d`, or run the tests myself. This review is therefore reasoning over your description plus what it necessarily implies — not verified coverage of the file. Per the review policy, that means I cannot issue a blind ACCEPT.
+
+## Verdict: BLOCK (verification-blocked + one real correctness gap)
+
+**Reason 1 — bounded grace is not actually proven by the described assertion.**
+The final assertion is on *heartbeat call count* (`calls >= 3`), not on the grace-triggered termination path. With `[100.0, 100.01, 100.04]`, only the third read (elapsed `.04 > grace .03`) exercises the bounded-grace branch — *if and only if* the loop reaches the grace check on that iteration rather than exiting first via "lost signal." Since the body "waits for lost signal," the loop may terminate on that path and never evaluate the grace bound, and the `calls >= 3` assertion would still pass. So a green run does **not** demonstrate that grace bounds anything. To prove it, assert the *reason* for exit (grace exceeded / the give-up branch), not just the number of heartbeats.
+
+**Reason 2 — the bare 3-element `iter()` is brittle exactly on the exhaustion axis you asked about.**
+`lambda: next(monotonic_values)` raises `StopIteration` the moment production reads `time.monotonic()` a 4th time. The test's determinism is therefore coupled 1:1 to the loop's *current internal monotonic-call cadence*. Two failure modes:
+- If the loop reads monotonic more than once per iteration, or takes a `start = time.monotonic()` baseline before the loop, the three values are consumed faster than assumed → premature `StopIteration` (surfacing as a confusing error, or `RuntimeError` under PEP 479 if the read happens inside a generator), not a meaningful assertion failure.
+- Any future refactor that adds a single monotonic read (even in logging) breaks this test for an unrelated reason.
+A non-exhausting deterministic source removes this coupling with zero loss of determinism: `itertools.count(100.0, 0.01)`, or a list whose last element repeats, or a small clamp helper returning the final value after exhaustion.
+
+**What the 10/10 run *does* prove:** the current code path reads monotonic exactly the number of times the three values allow (otherwise you'd see `StopIteration`, not green), and repeated errors are tolerated — calls 2+ raise `OSError` and the loop still reaches `calls >= 3`, so ≥2 post-error attempts survive. Repeated-error tolerance: **proven.** Iterator exhaustion: **not hit today, but structurally fragile.** Bounded grace: **not proven** by the stated assertion.
+
+## Flip to ACCEPT if either:
+1. You confirm the loop's *only* exit reachable within these three reads is the grace/give-up branch (lost-signal never set true in this test), **and** add an assertion on that exit reason — then grace is genuinely exercised and Reason 1 clears; or
+2. Paste the actual test diff + the production loop body (the monotonic call sites), so I can confirm the call cadence matches the 3-value budget and the grace branch fires. Reason 2 then downgrades to a maintainability nit rather than a block.
+
+Net: repeated-error coverage is solid; the block is that **bounded grace isn't asserted** and the exhaustion safety rests on an unstated, brittle call-count coupling I couldn't verify from here. If you re-run me in a session with file/read access, I'll confirm against the real code and likely resolve this quickly.

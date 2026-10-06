@@ -1,0 +1,19 @@
+## VERDICT: ACCEPT
+
+**Scope verified (read-only):** Only `tests/cron/test_script_claim_heartbeat.py` is modified (18 insertions). `cron/` production directory is clean — `git status --porcelain cron/` is empty. Production files are unchanged. ✓
+
+**Call path verified against real production code.** I drove the actual `_run_with_fire_claim_heartbeat` loop (`cron/scheduler.py:2452–2492`) with the test's exact monkeypatches — no reimplementation of the loop, no writes to the store. 10/10 deterministic: `result=True, body_saw_loss=True, calls=3, warn=True`.
+
+**Prior review blockers, each addressed:**
+
+1. **Finite iterator → non-exhausting clamped source.** `monotonic_values[min(monotonic_calls, len-1)]` (test line 543) never raises `StopIteration`; any extra `time.monotonic()` call beyond the 3 seeded values clamps to `100.04`. The prior exhaustion risk is gone.
+
+2. **Explicit grace-path assertion added.** The test now asserts the exact bounded-grace warning string emitted at `scheduler.py:2473–2477` (`"…fire_claim could not be renewed within 0.0s; interrupting uncertain run"`). The `%.1f` of the patched `0.03` grace renders `0.0`, matching the assertion. ✓
+
+3. **`body_saw_loss` recorded and asserted** (lines 556, 571) — proves `fire_claim_lost` was actually signalled into the run body, i.e. the interrupt genuinely propagated rather than the loop silently returning.
+
+4. **`calls >= 3` retained** (line 572) and holds exactly: call #1 is the pre-loop validation at `scheduler.py:2441` (returns True, `last_confirmed=100.0`); loop iter1 call #2 raises → Δ `100.01−100.0=0.01 < 0.03` (no fire); loop iter2 call #3 raises → Δ `100.04−100.0=0.04 ≥ 0.03` (fires). The test straddles the grace boundary in both directions — confirming grace does **not** fire prematurely and **does** fire once exceeded.
+
+`_same_run_holds_local_fire_fence` (line 2455) reads an empty dict → `False`, so it neither consumes a monotonic tick nor short-circuits; the deterministic sequence aligns exactly as intended.
+
+Operator proof (10/10, 32/32) is consistent with independent verification of the test under review. No edits, commits, pushes, or paid/API fallback were used.

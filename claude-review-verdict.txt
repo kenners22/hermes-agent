@@ -1,0 +1,42 @@
+VERDICT: NONBLOCKING FINDINGS
+
+The patch is correct in its core design and satisfies the stated requirement: same-run local fence contention is bypassed by the heartbeat only inside an owned, flock-protected fence window, and fail-closed behaviour is preserved everywhere else. I could not construct a disproving race within the paths I fully traced. Two items remain as an unclosed audit corner and test-coverage gaps; neither is a demonstrated defect, but one should be confirmed before merge.
+
+Patch integrity: SHA-256 of ./libby-cron-fence-candidate.patch = 2f5a8875c85f9d30adf65eaf0c1ffe44389cd7d68c92a40bb3c9e245ced2c4ca — matches the required hash.
+
+=== WHY THE MECHANISM IS SOUND (evidence) ===
+
+Core ordering (scheduler.py:2597-2604, `_owned_local_fire_fence`): the local holder flag is recorded via `_record_local_fire_fence` ONLY after `fire_claim_fence(...)` yields `owns_claim=True`, and strictly inside that `with` block. `fire_claim_fence` (jobs.py:354-364) yields True only when it holds the per-job fire fence (RLock + cross-process flock via `_fire_job_lock`, jobs.py:291-342) AND the durable `claim.by == expected_owner` checked under `_jobs_lock`. So whenever the bypass flag is set, this run provably holds the flock and owned the claim at fence entry.
+
+Bypass is window-scoped (scheduler.py:2455-2457): the heartbeat skips the durable `heartbeat_fire_claim` only while `_same_run_holds_local_fire_fence` is true. The flag is popped by the inner context manager before `fire_claim_fence` releases the flock, so outside the delivery window the durable check resumes unchanged — fail-closed preserved.
+
+Ownership cannot change under a held window: other owners' claim mutations go through the same flock — `heartbeat_fire_claim`/`_refresh_claim` (jobs.py:2514-2520) and `claim_job_for_fire` (jobs.py:2478-2511) both route through `_under_fire_fence`. While this run holds the flock, a competing owner's mutation blocks, so the bypass window is genuinely ownership-stable.
+
+Bug being fixed / no deadlock: the heartbeat runs on a separate daemon thread (scheduler.py:2480). Without the bypass, during a synchronous delivery holding the fire fence on the worker thread, the heartbeat thread's `heartbeat_fire_claim` → `_under_fire_fence` → `_fire_job_lock` would block on the cross-thread RLock up to `_JOBS_LOCK_TIMEOUT_SECONDS`; if delivery exceeds that, `acquired=False` → `heartbeat_fire_claim` returns False → `lost_ownership.set()` → a legitimately owned run is interrupted. That is exactly the false-loss the patch removes. Note `_FireOwnership.lost()` calling `heartbeat_fire_claim` on the worker thread WHILE inside the fence does NOT deadlock, because `_fire_job_lock` is reentrant and caches `held_locks` per thread (jobs.py:299, 306-312) — it returns the cached acquired value.
+
+Profile isolation (satisfied): the local fence key includes `_get_hermes_home().resolve()` (scheduler.py:2572). The heartbeat thread is started via `contextvars.copy_context().run(...)` (scheduler_script.py:409-414), and `get_hermes_home()` resolves the profile via the `_HERMES_HOME_OVERRIDE` contextvar (hermes_constants.py:82-89). So the recording thread (worker) and the checking thread (heartbeat) resolve identical `(home, job_id, owner)` keys; a second profile firing the same job_id/owner in-process keys to a different home and cannot trip the bypass. The holder count (scheduler.py:2576-2594) correctly supports the multiple/nested `side_effect_fence()` uses per run (output save at scheduler.py:2741, delivery at 2784).
+
+Test evidence reviewed: `test_delivery_held_local_fire_fence_does_not_self_cancel_heartbeat` (patch 83-156) asserts the heartbeat never reaches the durable call while delivery holds the fence; `test_ownership_loss_after_delivery_fence_still_fails_closed` (patch 159-208) asserts a durable owner loss after side effects still marks failure ("Fire claim ownership lost; stale result was discarded"). These map directly onto the two headline requirements. Reported results (16/16 focused; 1197 pass / 21 skip in full cron) are consistent with the code paths I traced.
+
+=== FINDINGS ===
+
+1. [MEDIUM — required confirmation, not a proven defect] Claim-write audit not fully closed.
+Evidence: I confirmed the principal claim mutators are flock-fenced (jobs.py:2262 release, 2478-2511 claim_job_for_fire, 2514-2520 heartbeat/refresh). Two raw assignments — `fire_claim=None` at jobs.py:2056 and jobs.py:2172, and `fire_claim={...}` at jobs.py:2503 — I did not each trace to their call sites to confirm they run under the fire fence (2503 is inside `apply`, which IS invoked via `_under_fire_fence` at 2511, so that one is fine; 2056 and 2172 were not traced).
+Required correction: confirm jobs.py:2056 and jobs.py:2172 either (a) execute only under `_fire_job_lock`/`_under_fire_fence`, or (b) occur only at job create/delete when no delivery for that job can be in flight. If either could reassign/clear another owner's `fire_claim` mid-delivery WITHOUT the flock, the bypass window would become fail-open (heartbeat suppressed while durable ownership silently changed) — that would be BLOCKING. Design intent ("Serialize one job's owner mutations and external side effects", jobs.py:293) strongly implies (a)/(b), so this is very likely already safe.
+
+2. [LOW / residual] Bounded-grace on store errors cannot elapse during a long delivery.
+Evidence: scheduler.py:2455-2457 resets `last_confirmed = time.monotonic()` on every skipped tick. If the durable store began erroring while a delivery holds the fence, the `_FIRE_CLAIM_HEARTBEAT_GRACE_SECONDS` uncertainty window (scheduler.py:2468-2478) cannot expire until the fence releases. This is acceptable — ownership is stable while the flock is held — but it means store-uncertainty detection is deferred to the end of the fenced window rather than mid-delivery. Consistent with the requirement (uncertainty must be fail-closed only "outside the fenced side-effect window").
+
+3. [LOW / test coverage] Two edges are unexercised by the new tests:
+   (a) profile isolation of the holder dict — no test proves a second home or second owner does not trip `_same_run_holds_local_fire_fence`;
+   (b) the fail-open corner from finding 1 — no test simulates a genuine second-owner takeover attempt during the fenced window.
+Neither is required to land given the mechanism, but they are the natural regression guards for the two residual risks above.
+
+=== PRE-EXISTING FAILURE ===
+`test_repeated_heartbeat_errors_cancel_after_bounded_grace` (calls=2 vs expected >=3): I did not independently reproduce, but it is consistent with being pre-existing and unrelated — that test records no local fence, so `_same_run_holds_local_fire_fence` returns False and the new short-circuit (scheduler.py:2455-2457) is inert on that path; the patch does not touch its control flow. This matches the brief's claim that it also fails unchanged on pristine HEAD.
+
+=== RESIDUAL RISK SUMMARY ===
+- Fail-open only if a `fire_claim` write can occur mid-delivery outside the flock (finding 1) — needs the two-line confirmation.
+- Bypass efficacy (not safety) depends on the heartbeat thread's copied home context matching the worker's; home is fixed per run so they agree today. Any future code that mutates the profile-home override after the heartbeat thread starts would silently disable the bypass (fail-closed, not fail-open).
+
+Recommendation: resolve finding 1 (trace jobs.py:2056 and 2172); if both are confirmed fenced or create/delete-only, this is safe to merge. I did not edit, run, or mutate anything.
