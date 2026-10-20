@@ -321,7 +321,7 @@ class TestMCPRuntimeScopes:
         }
         with patch.object(discovery._config, "_load_mcp_config", return_value=servers), \
              patch.object(discovery._config, "_detect_mcp_runtime_context", return_value="cli"), \
-             patch.object(discovery._core, "_ensure_mcp_sdk", return_value=True), \
+             patch("tools.mcp_tool._ensure_mcp_sdk", return_value=True), \
              patch.object(discovery, "register_mcp_servers", return_value=[]) as register, \
              patch.object(discovery, "_acquire_discovery_lock_with_retry", return_value=None):
             assert discovery.discover_mcp_tools() == []
@@ -335,7 +335,7 @@ class TestMCPRuntimeScopes:
             "xcode": {"command": "xcrun", "runtime_contexts": ["gateway"]},
         }
         with patch.object(discovery._config, "_detect_mcp_runtime_context", return_value="cli"), \
-             patch.object(discovery._core, "_ensure_mcp_sdk", return_value=True), \
+             patch("tools.mcp_tool._ensure_mcp_sdk", return_value=True), \
              patch.object(discovery._loop, "_ensure_mcp_loop") as ensure_loop:
             assert discovery.register_mcp_servers(servers) == []
 
@@ -349,7 +349,7 @@ class TestMCPRuntimeScopes:
         }
         with patch.object(discovery._config, "_load_mcp_config", return_value=servers), \
              patch.object(discovery._config, "_detect_mcp_runtime_context", return_value="cli"), \
-             patch.object(discovery._core, "_ensure_mcp_sdk", return_value=True), \
+             patch("tools.mcp_tool._ensure_mcp_sdk", return_value=True), \
              patch.object(discovery._loop, "_ensure_mcp_loop") as ensure_loop:
             assert discovery.probe_mcp_server_tools() == {}
 
