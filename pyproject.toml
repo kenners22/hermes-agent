@@ -382,7 +382,10 @@ documents = [
   "openpyxl==3.1.5",
   "python-pptx==1.0.2",
   "reportlab==5.1.0",
-  "pypdf==6.21.2",
+  # 6.21.3 fixes the pypdf highs that landed in that release. 6.21.4
+  # (GHSA-5849-834g-hvw5, GHSA-cggf-277g-3q54, GHSA-mfr5-77xh-9j7h) is
+  # inside the 3-day exclude-newer window (uploaded 2026-10-28).
+  "pypdf==6.21.3",
 ]
 # PDF text extraction and rasterization for skills/productivity/pdf. Only in
 # the skills' side environment (`hermes pm environment documents --extra
@@ -498,9 +501,10 @@ google = [
   # The Google SDKs permit older vulnerable transitives, so unlocked installs
   # must carry the same fixed floors as uv.lock and the runtime installers:
   # httplib2 0.32.0 (GHSA-j5g9-f88f-gfj3 decompression bomb DoS),
-  # pyasn1 0.6.4, google-auth 2.55.1.
+  # pyasn1 0.6.5 (GHSA-2qm8-x737-gmw5, GHSA-9m75-vc3g-4x39,
+  # GHSA-fm9c-5rcf-2q5p, GHSA-mm57-4v3p-rchx), google-auth 2.55.1.
   "httplib2==0.32.0",
-  "pyasn1==0.6.4",
+  "pyasn1==0.6.5",
 ]
 youtube = [
   # Required by skills/media/youtube-content and
@@ -659,6 +663,11 @@ override-dependencies = [
   # Remove this line when browser-harness allows Pillow 13. Plugin workspaces
   # inherit [tool.uv], so a plugin requiring pillow<13 also gets 13.0.0.
   "Pillow==13.0.0",
+  # filelock 3.32.7 is what torch and huggingface-hub resolve, and it is
+  # inside GHSA-v4x8-3wr5-3wq8 (high) plus the rest of the 4.2.1 set.
+  # Both declare filelock without an upper bound below 4 (huggingface-hub
+  # is >=3.10.0). 4.2.1 keeps the FileLock acquire/release path they call.
+  "filelock==4.2.1",
   # misaki[en] (pulled by [kittentts]) lists spacy-curated-transformers.
   # The newest release that fits spacy 3.8 (2.x needs thinc 9), 0.3.1, caps
   # Python below 3.14, so PM's `uv pip check` rejects the venv. Nothing
