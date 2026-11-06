@@ -503,8 +503,11 @@ google = [
   # httplib2 0.32.0 (GHSA-j5g9-f88f-gfj3 decompression bomb DoS),
   # pyasn1 0.6.5 (GHSA-2qm8-x737-gmw5, GHSA-9m75-vc3g-4x39,
   # GHSA-fm9c-5rcf-2q5p, GHSA-mm57-4v3p-rchx), google-auth 2.55.1.
+  # oauthlib 4.0.1 (GHSA-3jp2-3mrg-2vxc). requests-oauthlib allows >=3.0.0,
+  # so an unlocked install can stay on 4.0.0.
   "httplib2==0.32.0",
   "pyasn1==0.6.5",
+  "oauthlib==4.0.1",
 ]
 youtube = [
   # Required by skills/media/youtube-content and
